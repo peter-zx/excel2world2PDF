@@ -1,0 +1,13 @@
+# Web Framework
+streamlit>=1.28.0
+
+# Word Document Processing
+python-docx>=0.8.11
+docxtpl>=0.16.7
+
+# Excel Processing
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Utilities
+python-dateutil>=2.8.0
