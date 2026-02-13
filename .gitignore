@@ -42,6 +42,11 @@ src/storage/outputs/*.docx
 src/storage/configs/*.json
 samples/
 
+# Test files
+test_*.py
+test_*.docx
+test_*.xlsx
+
 # OS
 .DS_Store
 Thumbs.db

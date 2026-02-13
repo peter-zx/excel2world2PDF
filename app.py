@@ -483,12 +483,18 @@ def render_data_page():
     selected = template_options[selected_key]
     st.session_state.selected_template = selected
     
-    cols = list(selected.location_mapping.keys())
-    st.info(f"**需要列:** {', '.join(cols)}")
+    # 获取映射
+    mapping_info = selected.get_mapping()
+    var_names = list(mapping_info['data'].keys()) if mapping_info['type'] == 'text' else list(mapping_info['data'].keys())
+    
+    st.info(f"**模板变量:** {', '.join(var_names)}")
     
     if st.button("📥 下载Excel模板"):
-        simple_map = {k: v.get("original_text", "") for k, v in selected.location_mapping.items()}
-        excel_bytes = generate_excel_template(simple_map)
+        if mapping_info['type'] == 'text':
+            excel_bytes = generate_excel_template(mapping_info['data'])
+        else:
+            simple_map = {k: v.get("original_text", "") for k, v in mapping_info['data'].items()}
+            excel_bytes = generate_excel_template(simple_map)
         st.download_button(
             label="📥 下载",
             data=excel_bytes,
@@ -510,6 +516,45 @@ def render_data_page():
         st.session_state.uploaded_df = df
         st.dataframe(df, use_container_width=True)
         st.info(f"共 {len(df)} 条记录")
+        
+        # ========== 列映射配置 ==========
+        st.divider()
+        st.subheader("🔗 变量列映射配置")
+        st.caption("将模板变量映射到Excel列名")
+        
+        excel_columns = df.columns.tolist()
+        column_mapping = {}
+        
+        cols_per_row = 3
+        for i in range(0, len(var_names), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for j, var_name in enumerate(var_names[i:i+cols_per_row]):
+                with cols[j]:
+                    # 尝试自动匹配
+                    default_idx = 0
+                    for idx, col in enumerate(excel_columns):
+                        if col == var_name or var_name in col or col in var_name:
+                            default_idx = idx + 1  # +1 因为第一个选项是"不映射"
+                            break
+                    
+                    selected_col = st.selectbox(
+                        f"**{var_name}**",
+                        options=["-- 不映射 --"] + excel_columns,
+                        index=default_idx,
+                        key=f"col_map_{var_name}"
+                    )
+                    
+                    if selected_col != "-- 不映射 --":
+                        column_mapping[var_name] = selected_col
+        
+        # 保存列映射到session
+        st.session_state.column_mapping = column_mapping
+        
+        # 显示映射结果
+        if column_mapping:
+            st.success(f"已配置 {len(column_mapping)} 个映射")
+        else:
+            st.warning("请配置至少一个映射")
 
 
 # ==================== 批量生成页面 ====================
@@ -526,12 +571,23 @@ def render_generate_page():
     
     template = st.session_state.selected_template
     df = st.session_state.uploaded_df
+    column_mapping = st.session_state.get("column_mapping", {})
     
     c1, c2 = st.columns(2)
     c1.info(f"**模板:** {template.template_name}")
     c2.info(f"**数据:** {len(df)} 条")
     
-    if st.button("🚀 开始生成", type="primary", use_container_width=True):
+    # 显示列映射配置
+    if column_mapping:
+        with st.expander("📋 列映射配置", expanded=False):
+            for var_name, col_name in column_mapping.items():
+                st.write(f"**{var_name}** ← `{col_name}`")
+    
+    if st.button("开始生成", type="primary", use_container_width=True):
+        if not column_mapping:
+            st.error("请先在「数据导入」页面配置列映射")
+            return
+        
         with st.spinner("生成中..."):
             try:
                 template_bytes = template_service.get_template_bytes(template.template_id)
@@ -539,13 +595,40 @@ def render_generate_page():
                     st.error("模板不存在")
                     return
                 
-                data_list = excel_service.dataframe_to_dict_list(df)
-                files = word_service.batch_generate_by_location(
-                    template_bytes, data_list, template.location_mapping
-                )
+                # 根据列映射转换数据
+                transformed_data = []
+                for _, row in df.iterrows():
+                    new_row = {}
+                    for var_name, col_name in column_mapping.items():
+                        if col_name in df.columns:
+                            value = row[col_name]
+                            # 处理特殊类型
+                            if pd.isna(value):
+                                new_row[var_name] = ""
+                            elif isinstance(value, (pd.Timestamp, datetime)):
+                                new_row[var_name] = value.strftime("%Y-%m-%d")
+                            else:
+                                new_row[var_name] = str(value)
+                    transformed_data.append(new_row)
+                
+                # 获取映射信息
+                mapping_info = template.get_mapping()
+                
+                # 根据映射类型生成
+                if mapping_info['type'] == 'location':
+                    files = word_service.batch_generate_by_location(
+                        template_bytes, transformed_data, mapping_info['data']
+                    )
+                elif mapping_info['type'] == 'text':
+                    files = word_service.batch_generate_by_text(
+                        template_bytes, transformed_data, mapping_info['data']
+                    )
+                else:
+                    st.error("模板没有配置映射")
+                    return
                 
                 st.session_state.generated_files = files
-                st.success(f"✅ 成功 {len(files)} 份")
+                st.success(f"成功生成 {len(files)} 份合同！")
                 
             except Exception as e:
                 st.error(f"失败: {e}")
@@ -558,7 +641,7 @@ def render_generate_page():
         zip_buf.seek(0)
         
         st.download_button(
-            label="📦 下载全部",
+            label="下载全部合同",
             data=zip_buf,
             file_name=f"合同_{datetime.now():%Y%m%d_%H%M%S}.zip",
             mime="application/zip",
